@@ -97,7 +97,7 @@ export function drawBoundingBoxes(
     );
 
     if(isTarget && prediction.score > 0.7) {
-        ctx.fillStyle = "#FF00000";
+        ctx.fillStyle = "#FF0000";
         ctx.font = "bold 20px Arial";
         ctx.fillText(
           "TARGET LOCKED",

@@ -1,7 +1,9 @@
-import { type RefObject, useEffect } from "react";
+import { type RefObject, useEffect, useRef } from "react";
 import Webcam from "react-webcam";
 import * as cocoSsd from "@tensorflow-models/coco-ssd";
 import { drawBoundingBoxes } from "../utils/drawBoundingBoxes";
+import { smoothValue } from "../utils/smooth";
+import { speakDetection } from "../utils/voice";
 
 interface Props {
   webcamRef: RefObject<Webcam | null>;
@@ -10,7 +12,7 @@ interface Props {
 
   onFpsUpdate?: (fps: number) => void;
   onObjectCountUpdate?: (count: number) => void;
-  
+  onDetectionUpdate?: (label: string) => void;
 }
 
 export function useObjectDetection({
@@ -19,23 +21,35 @@ export function useObjectDetection({
   model,
   onFpsUpdate,
   onObjectCountUpdate,
+  onDetectionUpdate,
 }: Props) {
   useEffect(() => {
     if (!model) return;
 
     let animationId: number;
     let lastTime = performance.now();
-    let objectIdCounter = 0;
-    const trackedObjects = new Map();
+
+    const memory = new Map<number, {
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+    }>();
+
+    const tracked = new Map<string, number>();
+    let nextId = 0;
+
+    const scanModeRef = { current: "live" as "live" | "scan" };
+
+    (window as any).triggerScan = () => {
+      scanModeRef.current = "scan";
+    };
 
     const detect = async () => {
       const webcam = webcamRef.current;
       const now = performance.now();
 
-      const fps = Math.round(
-        1000 / (now - lastTime)
-      );
-
+      const fps = Math.round(1000 / (now - lastTime));
       lastTime = now;
       onFpsUpdate?.(fps);
 
@@ -47,26 +61,66 @@ export function useObjectDetection({
         const video = webcam.video;
 
         const predictions = await model.detect(video);
-        const enhanced = predictions.map((p) => {
-            const key =
-                `${p.class}_${Math.round(p.bbox[0] / 50)}_${Math.round(p.bbox[1] / 50)}`;
 
-            if (!trackedObjects.has(key)) {
-                trackedObjects.set(key, {
-                id: objectIdCounter++,
-                lastSeen: Date.now(),
-                });
+        const topPrediction = predictions.reduce(
+        (best: any, curr: any) =>
+            curr.score > best.score ? curr : best,
+        predictions[0]
+        );
+
+        if (topPrediction && topPrediction.score > 0.5) {
+        onDetectionUpdate?.(topPrediction.class);
+        }
+
+        const spokenThisLoop = new Set<number>();
+
+        const enhanced = predictions.map((p: any) => {
+          const [x, y, w, h] = p.bbox;
+
+
+          const key = `${p.class}-${Math.round(x / 50)}-${Math.round(y / 50)}`;
+
+          if (!tracked.has(key)) {
+            tracked.set(key, nextId++);
+          }
+
+          const id = tracked.get(key)!;
+          p.id = id;
+
+          if (scanModeRef.current === "scan") {
+            if (p.score > 0.6 && !spokenThisLoop.has(id)) {
+              speakDetection(p.class);
+              spokenThisLoop.add(id);
             }
+          }
 
-            const obj = trackedObjects.get(key);
+          const prev = memory.get(id);
 
-            obj.lastSeen = Date.now();
+          const smoothed = prev
+            ? {
+                x: smoothValue(prev.x, x),
+                y: smoothValue(prev.y, y),
+                w: smoothValue(prev.w, w),
+                h: smoothValue(prev.h, h),
+              }
+            : { x, y, w, h };
 
-            return {
-                ...p,
-                id: obj.id,
-            };
-            });
+          memory.set(id, smoothed);
+
+          return {
+            ...p,
+            bbox: [
+              smoothed.x,
+              smoothed.y,
+              smoothed.w,
+              smoothed.h,
+            ],
+          };
+        });
+
+        if (scanModeRef.current === "scan") {
+          scanModeRef.current = "live";
+        }
 
         onObjectCountUpdate?.(predictions.length);
 
